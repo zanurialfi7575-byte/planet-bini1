@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Planet Bini — Meteor Adventure (9:16)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden}
+    #stage{
+      position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+      width:min(100vw, calc(100vh * 9/16));
+      height:min(100vh, calc(100vw * 16/9));
+      background:#000;overflow:hidden;
+      touch-action:none;
+    }
+    canvas{display:block;width:100%;height:100%}
+
+    #ui{
+      position:absolute;left:12px;top:12px;z-index:5;
+      color:rgba(255,255,255,.92);
+      background:rgba(0,0,0,.45);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;
+      padding:10px 12px;
+      backdrop-filter: blur(12px);
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      max-width: 360px;
+    }
+    #ui .title{font-weight:800;font-size:12px;margin-bottom:6px}
+    #ui .mut{font-size:11px;opacity:.78;line-height:1.35}
+    #ui .row{display:flex;gap:8px;margin-top:8px}
+    #ui button{
+      flex:1;cursor:pointer;border-radius:12px;padding:10px 10px;
+      border:1px solid rgba(255,255,255,.16);
+      background:rgba(255,255,255,.06);
+      color:#fff;font-size:12px;
+    }
+    #ui button:hover{background:rgba(255,255,255,.10)}
+    #pill{
+      display:inline-block;margin-top:6px;
+      padding:4px 8px;border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      font-size:11px;opacity:.9;
+    }
+    #tip{
+      position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
+      font-size:11px;color:rgba(255,255,255,.55);
+      background:rgba(0,0,0,.25);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:999px;padding:6px 10px;
+      backdrop-filter: blur(10px);
+      pointer-events:none;
+      z-index:5;
+      text-align:center;
+      max-width: 92%;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c"></canvas>
+
+    <div id="ui">
+      <div class="title">☄️ Meteor Photo Adventure — LIMIT 20 TERDEKAT</div>
+      <div class="mut">
+        - jauh: meteor jadi dot / hilang (hemat HP)<br>
+        - dekat: cuma 20 meteor terdekat render foto<br>
+        - drag = rotate • scroll/pinch = zoom (kalau ada)<br>
+        - musik butuh klik (aturan browser)
+      </div>
+      <div class="row">
+        <button id="play">▶ Play</button>
+        <button id="pause">⏸ Pause</button>
+      </div>
+      <div class="row">
+        <button id="tour">🧭 Auto Tour: ON</button>
+        <button id="shuffle">🎲 Shuffle</button>
+      </div>
+      <div id="pill">Beat: 0.00 • Photo: 0/20</div>
+    </div>
+
+    <div id="tip">Double tap fullscreen • Drag rotate • Zoom = kamera (yang lain menjauh)</div>
+
+    <audio id="music" src="music.mp3" loop preload="auto"></audio>
+  </div>
+
+<script>
+(() => {
+  // =======================
+  // PERFORMANCE SETTINGS
+  // =======================
+  const DPR = 1; // paksa ringan buat HP
+
+  // =======================
+  // USER SETTINGS
+  // =======================
+  const TEX_COUNT = 43;        // fotos/1.jpg..43.jpg
+  const METEOR_COUNT = 140;    // aman HP
+  const PHOTO_LIMIT = 20;      // ✅ cuma 20 meteor terdekat render foto
+
+  const PLANET_R = 170;        // radius planet (unit dunia)
+  const FIELD_R  = 1400;       // sebar starfield
+
+  // Depth limit (biar gak numpuk)
+  const DEPTH_NEAR = 80;
+  const DEPTH_FAR  = 2200;
+
+  // "Real zoom push" strength (zoom-in => objek menjauh dari center)
+  const ZOOM_PUSH = 0.65;
+
+  // Culling by size
+  const MIN_DRAW_R = 5.5;  // kalau lebih kecil dari ini, skip total
+  const DOT_R_MAX  = 18;   // kalau r kecil / agak jauh => dot mode
+
+  // =======================
+  // CANVAS
+  // =======================
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  const stage = document.getElementById('stage');
+  const pill = document.getElementById('pill');
+
+  function resize(){
+    const w = stage.clientWidth;
+    const h = stage.clientHeight;
+    canvas.width  = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // =======================
+  // LOAD IMAGES
+  // =======================
+  const textures = [];
+  function loadImg(src){
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+  }
+
+  (async ()=>{
+    for(let i=1;i<=TEX_COUNT;i++){
+      const img = await loadImg(`fotos/${i}.jpg`);
+      if(img) textures.push(img);
+    }
+    if(!textures.length){
+      alert("Gagal load fotos/1.jpg dst. Cek folder 'fotos' dan nama file .jpg");
+    }
+  })();
+
+  // =======================
+  // STARFIELD
+  // =======================
+  const stars = [];
+  for(let i=0;i<650;i++){
+    stars.push({
+      x:(Math.random()-0.5)*FIELD_R*2,
+      y:(Math.random()-0.5)*FIELD_R*2,
+      z:(Math.random()-0.5)*FIELD_R*2,
+      a: Math.random()*0.9 + 0.1,
+      s: Math.random()*1.2 + 0.4
+    });
+  }
+
+  // =======================
+  // METEORS
+  // =======================
+  const rand = (a,b)=> a + Math.random()*(b-a);
+
+  function makeMeteors(){
+    const arr = [];
+    for(let i=0;i<METEOR_COUNT;i++){
+      const radius = rand(PLANET_R*1.3, PLANET_R*5.4);
+      const angle  = rand(0, Math.PI*2);
+      const tilt   = rand(-1.15, 1.15);
+      const speed  = rand(0.0018, 0.0064);
+      const height = rand(-PLANET_R*1.9, PLANET_R*1.9);
+      const size   = rand(22, 56);
+      arr.push({
+        radius, angle, tilt, speed, height, size,
+        texIdx: i,
+        seed: Math.random()*9999
+      });
+    }
+    return arr;
+  }
+
+  let meteors = makeMeteors();
+
+  // =======================
+  // AUDIO + BEAT
+  // =======================
+  const music = document.getElementById('music');
+  const playBtn = document.getElementById('play');
+  const pauseBtn = document.getElementById('pause');
+  const tourBtn = document.getElementById('tour');
+  const shuffleBtn = document.getElementById('shuffle');
+
+  let audioCtx, analyser, dataArray;
+  let beat = 0;
+
+  function setupAudio(){
+    if(audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    const src = audioCtx.createMediaElementSource(music);
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  playBtn.onclick = async ()=>{
+    try{
+      setupAudio();
+      if(audioCtx.state !== 'running') await audioCtx.resume();
+      await music.play();
+    }catch(e){
+      alert("Gagal play. Pastikan file music.mp3 ada sejajar index.html");
+    }
+  };
+  pauseBtn.onclick = ()=> music.pause();
+
+  function calcBeat(){
+    if(!analyser){ beat = 0; return; }
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    const start = 2;
+    const end = Math.floor(dataArray.length * 0.22);
+    for(let i=start;i<end;i++) sum += dataArray[i];
+    const avg = sum / (end-start) / 255;
+    beat = Math.max(0, Math.min(1, avg * 1.7));
+  }
+
+  // =======================
+  // CAMERA
+  // =======================
+  const cam = {
+    x: 0, y: 70, z: 900,
+    targetX: 0, targetY: 0, targetZ: 0,
+    fov: 640,
+    fovMin: 360,
+    fovMax: 920
+  };
+
+  let autoTour = true;
+  let dragging=false, lastX=0, lastY=0;
+  let yaw=0, pitch=0;
+
+  stage.addEventListener('pointerdown', (e)=>{
+    dragging=true; lastX=e.clientX; lastY=e.clientY;
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-lastX, dy=e.clientY-lastY;
+    lastX=e.clientX; lastY=e.clientY;
+    yaw += dx * 0.006;
+    pitch += dy * 0.004;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  });
+  stage.addEventListener('pointerup', ()=> dragging=false);
+
+  stage.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    cam.fov = Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov + e.deltaY*0.65));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  }, {passive:false});
+
+  // double tap fullscreen
+  let lastTap=0;
+  stage.addEventListener('touchend', async ()=>{
+    const now = Date.now();
+    if(now - lastTap < 280){
+      try{
+        if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+        else await document.exitFullscreen();
+      }catch(e){}
+    }
+    lastTap = now;
+  }, {passive:true});
+
+  tourBtn.onclick = ()=>{
+    autoTour = !autoTour;
+    tourBtn.textContent = autoTour ? "🧭 Auto Tour: ON" : "🧭 Auto Tour: OFF";
+  };
+  shuffleBtn.onclick = ()=>{
+    meteors = makeMeteors();
+  };
+
+  // =======================
+  // PROJECTION (simple look-at)
+  // =======================
+  function project(px,py,pz){
+    const tx = cam.targetX, ty = cam.targetY, tz = cam.targetZ;
+
+    let dx = tx - cam.x, dy = ty - cam.y, dz = tz - cam.z;
+    const dl = Math.hypot(dx,dy,dz) || 1;
+    dx/=dl; dy/=dl; dz/=dl;
+
+    const upx=0, upy=1, upz=0;
+
+    let rx = dy*upz - dz*upy;
+    let ry = dz*upx - dx*upz;
+    let rz = dx*upy - dy*upx;
+    const rl = Math.hypot(rx,ry,rz) || 1;
+    rx/=rl; ry/=rl; rz/=rl;
+
+    let ux = ry*dz - rz*dy;
+    let uy = rz*dx - rx*dz;
+    let uz = rx*dy - ry*dx;
+
+    const x = px - cam.x, y = py - cam.y, z = pz - cam.z;
+
+    const cx = x*rx + y*ry + z*rz;
+    const cy = x*ux + y*uy + z*uz;
+    const cz = x*dx + y*dy + z*dz;
+
+    const f = cam.fov / (cam.fov + cz);
+    const w = canvas.width;
+    const h = canvas.height;
+    const sx = w/2 + cx * f;
+    const sy = h/2 - cy * f;
+
+    return { sx, sy, f, cz };
+  }
+
+  // =======================
+  // REAL ZOOM PUSH (screen-space)
+  // =======================
+  function applyZoomPush(p){
+    const z = (cam.fovMax - cam.fov) / (cam.fovMax - cam.fovMin); // 0..1
+    const dn = Math.max(0, Math.min(1, (p.cz - DEPTH_NEAR) / (DEPTH_FAR - DEPTH_NEAR)));
+    const depthBoost = (1.25 - dn); // near bigger
+    const push = z * ZOOM_PUSH * depthBoost;
+
+    const w = canvas.width, h = canvas.height;
+    const cx = w/2, cy = h/2;
+    const vx = p.sx - cx;
+    const vy = p.sy - cy;
+
+    return { sx: cx + vx * (1 + push), sy: cy + vy * (1 + push) };
+  }
+
+  // =======================
+  // DRAW
+  // =======================
+  function drawNebula(){
+    const w = canvas.width, h = canvas.height;
+    const g = ctx.createRadialGradient(w*0.35, h*0.35, 10, w*0.5, h*0.55, Math.max(w,h));
+    g.addColorStop(0, "rgba(0,180,255,0.12)");
+    g.addColorStop(0.35, "rgba(255,0,200,0.10)");
+    g.addColorStop(0.7, "rgba(0,255,160,0.08)");
+    g.addColorStop(1, "rgba(0,0,0,1)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,w,h);
+  }
+
+  function drawStars(){
+    for(const s of stars){
+      const p = project(s.x, s.y, s.z);
+      if(p.cz < -cam.fov*0.8) continue;
+      const a = Math.max(0, Math.min(1, s.a * p.f));
+      const r = s.s * p.f;
+      ctx.globalAlpha = a * 0.85;
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPlanet(){
+    const p = project(0,0,0);
+    const R = PLANET_R * p.f;
+
+    const glow = ctx.createRadialGradient(p.sx, p.sy, R*0.2, p.sx, p.sy, R*2.6);
+    glow.addColorStop(0, `rgba(180,255,240,${0.26 + beat*0.22})`);
+    glow.addColorStop(0.45, `rgba(80,180,255,${0.12 + beat*0.16})`);
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, R*2.6, 0, Math.PI*2);
+    ctx.fill();
+
+    const body = ctx.createRadialGradient(p.sx - R*0.25, p.sy - R*0.25, R*0.2, p.sx, p.sy, R*1.05);
+    body.addColorStop(0, "rgba(255,255,255,0.82)");
+    body.addColorStop(0.28, "rgba(180,255,240,0.45)");
+    body.addColorStop(0.58, "rgba(80,180,255,0.22)");
+    body.addColorStop(0.86, "rgba(0,0,0,0.92)");
+    body.addColorStop(1, "rgba(0,0,0,1)");
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, R, 0, Math.PI*2);
+    ctx.fill();
+
+    // vignette
+    const w = canvas.width, h = canvas.height;
+    const vg = ctx.createRadialGradient(w*0.5, h*0.55, Math.min(w,h)*0.1, w*0.5, h*0.55, Math.max(w,h)*0.78);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.86)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,w,h);
+  }
+
+  function drawMeteorPhoto(tex, sx, sy, r, glowA){
+    // glow
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sx, sy, r*0.2, sx, sy, r*1.9);
+    g.addColorStop(0, `rgba(255,255,255,${0.20 + glowA})`);
+    g.addColorStop(0.5, `rgba(80,180,255,${0.09 + glowA*0.9})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r*1.9, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // circle crop image
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI*2);
+    ctx.clip();
+    ctx.drawImage(tex, sx - r, sy - r, r*2, r*2);
+    ctx.restore();
+
+    // border
+    ctx.strokeStyle = "rgba(255,255,255,0.16)";
+    ctx.lineWidth = Math.max(1, r*0.06);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  function drawMeteorDot(sx, sy, r, a){
+    // dot
+    ctx.globalAlpha = a * 0.55;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(1.2, r*0.22), 0, Math.PI*2);
+    ctx.fill();
+
+    // glow tipis
+    ctx.globalAlpha = a * 0.30;
+    ctx.fillStyle = `rgba(80,180,255,${0.10 + beat*0.12})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r*0.9, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  }
+
+  // =======================
+  // LOOP
+  // =======================
+  let t = 0;
+
+  function updateCamera(){
+    cam.targetX = 0; cam.targetY = 0; cam.targetZ = 0;
+
+    if(autoTour){
+      const a = t*0.18;
+      cam.x = Math.cos(a) * (820 - beat*110);
+      cam.z = Math.sin(a) * (820 - beat*110);
+      cam.y = 140 + Math.sin(a*0.8) * 95;
+
+      // cinematic zoom wave
+      const zWave = (Math.sin(t*0.22)*0.5 + 0.5); // 0..1
+      cam.fov = cam.fovMax - zWave * (cam.fovMax - cam.fovMin) * 0.88 - beat*60;
+      cam.fov = Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov));
+    } else {
+      const dist = 860;
+      cam.x = Math.cos(yaw) * Math.cos(pitch) * dist;
+      cam.z = Math.sin(yaw) * Math.cos(pitch) * dist;
+      cam.y = Math.sin(pitch) * dist * 0.55;
+    }
+  }
+
+  function frame(){
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0,0,w,h);
+
+    calcBeat();
+    drawNebula();
+    drawStars();
+
+    t += 0.016;
+    updateCamera();
+
+    // Build list of visible meteors
+    const list = [];
+    const speedMul = 1 + beat*0.9;
+
+    for(const m of meteors){
+      m.angle += m.speed * speedMul;
+
+      const ca = Math.cos(m.angle), sa = Math.sin(m.angle);
+      const ct = Math.cos(m.tilt),  st = Math.sin(m.tilt);
+
+      let x = ca * m.radius;
+      let z = sa * m.radius;
+      let y = m.height + Math.sin(m.angle*2.0 + m.seed) * (8 + beat*12);
+
+      // tilt orbit plane
+      const y2 = y*ct - z*st;
+      const z2 = y*st + z*ct;
+      y = y2; z = z2;
+
+      const p = project(x,y,z);
+
+      // depth cull
+      if(p.cz < DEPTH_NEAR || p.cz > DEPTH_FAR) continue;
+
+      // size in screen
+      let r = (m.size * p.f) * 0.62;
+      if(r < MIN_DRAW_R) continue;
+
+      // distance for "nearest"
+      const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z;
+      const dist = Math.hypot(dx,dy,dz);
+
+      // fade far
+      const dn = (p.cz - DEPTH_NEAR) / (DEPTH_FAR - DEPTH_NEAR);
+      const alpha = Math.max(0.10, Math.min(1, 1.15 - dn));
+
+      const pushed = applyZoomPush(p);
+
+      // kalau terlalu jauh, hilang total (lebih hemat)
+      if (dn > 0.82) continue;
+
+      list.push({ m, x,y,z, p, sx:pushed.sx, sy:pushed.sy, r, alpha, dist, dn });
+    }
+
+    // planet first
+    drawPlanet();
+
+    // Tentukan 20 terdekat yang boleh "photo"
+    // 1) urut berdasarkan dist
+    list.sort((a,b)=> a.dist - b.dist);
+    const photoSet = new Set();
+    for(let i=0;i<list.length && photoSet.size<PHOTO_LIMIT;i++){
+      const it = list[i];
+      // syarat supaya foto beneran hanya muncul saat cukup "dekat/terlihat"
+      if (it.dn <= 0.72 && it.r >= DOT_R_MAX) photoSet.add(it.m);
+    }
+
+    // 2) untuk drawing depth bagus: urut lagi jauh->dekat (cz kecil dulu)
+    list.sort((a,b)=> a.p.cz - b.p.cz);
+
+    let photoCount = 0;
+
+    // draw meteors
+    if(textures.length){
+      for(const it of list){
+        // kalau bukan 20 terdekat -> dot / atau hilang
+        const isPhoto = photoSet.has(it.m);
+
+        if(!isPhoto){
+          // dot mode: kalau masih lumayan dekat, render dot; kalau jauh dan kecil, skip
+          if (it.dn > 0.72 || it.r < DOT_R_MAX){
+            // dot
+            drawMeteorDot(it.sx, it.sy, it.r, it.alpha);
+          } else {
+            // masih dekat tapi bukan top 20 -> dot juga (hemat)
+            drawMeteorDot(it.sx, it.sy, it.r, it.alpha);
+          }
+          continue;
+        }
+
+        // photo mode (20 terdekat)
+        const tex = textures[it.m.texIdx % textures.length];
+        ctx.globalAlpha = it.alpha;
+        drawMeteorPhoto(tex, it.sx, it.sy, it.r, 0.06 + beat*0.22);
+        photoCount++;
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // UI update
+    pill.textContent = `Beat: ${beat.toFixed(2)} • Photo: ${photoCount}/${PHOTO_LIMIT}`;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+  </html>
