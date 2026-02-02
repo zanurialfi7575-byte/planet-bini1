@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>Planet Bini 💖</title>
+
+<style>
+html,body{
+  margin:0;
+  padding:0;
+  background:black;
+  overflow:hidden;
+  height:100%;
+  font-family:system-ui;
+}
+
+#scene{
+  position:fixed;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.orbit{
+  position:absolute;
+  width:90vmin;
+  height:90vmin;
+  border-radius:50%;
+  animation:spin 40s linear infinite;
+}
+
+.orbit img{
+  position:absolute;
+  width:60px;
+  height:60px;
+  object-fit:cover;
+  border-radius:50%;
+  box-shadow:0 0 15px rgba(255,255,255,.6);
+}
+
+@keyframes spin{
+  from{transform:rotate(0deg)}
+  to{transform:rotate(360deg)}
+}
+
+#ui{
+  position:fixed;
+  top:15px;
+  left:15px;
+  color:white;
+  background:rgba(0,0,0,.6);
+  padding:12px;
+  border-radius:12px;
+  backdrop-filter:blur(10px);
+}
+button{
+  padding:6px 10px;
+  border-radius:8px;
+  border:none;
+}
+</style>
+</head>
+
+<body>
+
+<div id="scene"></div>
+
+<div id="ui">
+  <div>🪐 Planet Bini</div>
+  <button onclick="music.play()">▶ Play Music</button>
+</div>
+
+<audio id="music" src="music.mp3" loop></audio>
+
+<script>
+const total = 43; // jumlah foto kamu
+const scene = document.getElementById("scene");
+const orbit = document.createElement("div");
+orbit.className = "orbit";
+scene.appendChild(orbit);
+
+for(let i=0;i<total;i++){
+  const img = document.createElement("img");
+  img.src = `fotos/${i+1}.jpg`;
+  const angle = (360/total)*i;
+  const r = 45;
+  img.style.left = 50 + r*Math.cos(angle*Math.PI/180) + "%";
+  img.style.top  = 50 + r*Math.sin(angle*Math.PI/180) + "%";
+  img.style.transform = "translate(-50%,-50%)";
+  orbit.appendChild(img);
+}
+</script>
+
+</body>
+  </html>
