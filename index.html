@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,height=device-height,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Photo Star Adventure (9:16)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    canvas{display:block;width:100vw;height:100vh;touch-action:none}
+    .hud{
+      position:fixed;left:14px;top:14px;z-index:10;
+      max-width:min(92vw,560px);
+      background:rgba(10,12,18,.55);
+      border:1px solid rgba(255,255,255,.10);
+      backdrop-filter: blur(10px);
+      border-radius:16px;
+      padding:12px 12px 10px;
+      color:#e9e9ff;
+      box-shadow:0 10px 30px rgba(0,0,0,.35);
+      font-size:12px;
+    }
+    .title{font-weight:900;font-size:14px;margin-bottom:6px}
+    .row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    button{
+      appearance:none;border:1px solid rgba(255,255,255,.14);
+      background:rgba(255,255,255,.07);
+      color:#fff;border-radius:12px;padding:9px 11px;
+      font-weight:800;font-size:12px;
+    }
+    button:active{transform:scale(.98)}
+    .pill{display:inline-block;margin-top:8px;margin-right:8px;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10)}
+    .rom{
+      position:fixed;left:50%;bottom:92px;transform:translateX(-50%);
+      z-index:11;
+      background:rgba(10,12,18,.60);
+      border:1px solid rgba(255,255,255,.12);
+      backdrop-filter: blur(12px);
+      border-radius:16px;
+      padding:12px 14px;
+      color:#fff;font-weight:900;text-align:center;
+      max-width:min(92vw,720px);
+      opacity:0;transition:.25s;
+      pointer-events:none;line-height:1.35;
+    }
+    .rom.show{opacity:1;transform:translateX(-50%) translateY(-6px);}
+    .rom small{display:block;margin-top:6px;font-weight:700;opacity:.85}
+    .tip{
+      position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+      z-index:10;
+      background:rgba(0,0,0,.35);
+      border:1px solid rgba(255,255,255,.10);
+      color:rgba(255,255,255,.85);
+      padding:10px 14px;border-radius:999px;
+      font-size:12px;backdrop-filter: blur(10px);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div class="hud">
+    <div class="title">✨ Photo Star Adventure (9:16) — super ringan</div>
+    <div>• Drag = geser • Pinch = zoom • Tap foto = zoom mendekat</div>
+    <div>• Hemat: render <b>20 foto terdekat</b> aja (yang jauh hilang)</div>
+    <div class="row">
+      <button id="btnMusic">🎵 Play Music</button>
+      <button id="btnShuffle">🎲 Shuffle</button>
+      <button id="btnHome">🏠 Reset View</button>
+    </div>
+    <div style="margin-top:8px">
+      <span class="pill" id="stLoaded">Loaded: 0/43</span>
+      <span class="pill" id="stNear">Near: 0/20</span>
+      <span class="pill" id="stZoom">Zoom: 1.00</span>
+      <span class="pill" id="stFocus">Focus: -</span>
+    </div>
+  </div>
+
+  <div class="rom" id="rom"></div>
+  <div class="tip">Tip: pinch untuk zoom • tap foto untuk mendekat</div>
+
+  <audio id="music" src="music.mp3" preload="auto" loop></audio>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
+
+  const btnMusic = document.getElementById('btnMusic');
+  const btnShuffle = document.getElementById('btnShuffle');
+  const btnHome = document.getElementById('btnHome');
+  const stLoaded = document.getElementById('stLoaded');
+  const stNear = document.getElementById('stNear');
+  const stZoom = document.getElementById('stZoom');
+  const stFocus = document.getElementById('stFocus');
+  const rom = document.getElementById('rom');
+  const music = document.getElementById('music');
+
+  const PHOTO_COUNT = 43;
+  const LIMIT_NEAR = 20;
+
+  const ROMANTIC = [
+    "Aku peduli sama dirimu. ❤️",
+    "Dimata ku, kamu anak kecil yang jadi penyemangat ku. 🏡✨",
+    "Aku pasti dibilang buaya karna bikin gini, tapi buaya mana yang mau capek mikir untuk bikin gini😒",
+    "Jangan tinggalin aku.",
+    "Aku bakal terus berusaha nyenengin kamu. 😊💗",
+    "Aku bangga sama kamu. 🌷",
+  ];
+
+  // resize
+  function resize(){
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(innerWidth * dpr);
+    canvas.height = Math.floor(innerHeight * dpr);
+    canvas.style.width = innerWidth + 'px';
+    canvas.style.height = innerHeight + 'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // camera (2D world with fake depth)
+  let camX = 0, camY = 0;
+  let zoom = 1.0, targetZoom = 1.0;
+
+  // focus animation
+  let focus = null; // {id, tx, ty, tz, t}
+  function showRomantic(text, extra=""){
+    rom.innerHTML = text + (extra? `<small>${extra}</small>`:"");
+    rom.classList.add('show');
+    clearTimeout(showRomantic._t);
+    showRomantic._t = setTimeout(()=>rom.classList.remove('show'), 2200);
+  }
+
+  // generate star-photo points
+  // Each photo has: x,y,z (depth), size
+  let stars = [];
+  function rand(n=1){ return Math.random()*n; }
+
+  function generate(){
+    stars = [];
+    // distribute like "field of stars": wide area, different depths
+    for(let i=0;i<900;i++){
+      // not all are photos — most are tiny stars (drawn as dots)
+      stars.push({
+        type:'dot',
+        x:(rand(1)-0.5)*2600,
+        y:(rand(1)-0.5)*4600,
+        z: Math.pow(rand(1), 1.8), // 0..1 (0 near, 1 far)
+        r: 0.6 + rand(1.2),
+        a: 0.25 + rand(0.75)
+      });
+    }
+
+    // Photos as "special stars"
+    for(let p=1;p<=PHOTO_COUNT;p++){
+      const z = Math.pow(rand(1), 1.25);      // more mid depth
+      const spread = 1800 + z*2400;           // far => wider
+      stars.push({
+        type:'photo',
+        id:p,
+        x:(rand(1)-0.5)*spread,
+        y:(rand(1)-0.5)*spread*1.55,
+        z,
+        w: 110, // screen base size (9:16)
+        h: 110*(16/9),
+        rot: (rand(1)-0.5)*0.12
+      });
+    }
+  }
+  generate();
+
+  // image cache only for near photos
+  const imgCache = new Map(); // id -> {img, last}
+  let loaded = 0;
+
+  function getImg(id){
+    if(imgCache.has(id)){
+      imgCache.get(id).last = performance.now();
+      return imgCache.get(id).img;
+    }
+    // evict if full
+    if(imgCache.size >= LIMIT_NEAR){
+      let oldestKey=null, oldest=Infinity;
+      for(const [k,v] of imgCache){
+        if(v.last < oldest){ oldest=v.last; oldestKey=k; }
+      }
+      if(oldestKey!=null) imgCache.delete(oldestKey);
+    }
+    const img = new Image();
+    img.decoding = "async";
+    img.loading = "eager";
+    img.src = `fotos/${id}.jpg`;
+    img.onload = () => {
+      loaded++;
+      stLoaded.textContent = `Loaded: ${loaded}/${PHOTO_COUNT}`;
+    };
+    imgCache.set(id, {img, last: performance.now()});
+    return img;
+  }
+
+  // input: drag + pinch
+  const pointers = new Map();
+  let pinchDist = null;
+
+  canvas.addEventListener('pointerdown', e=>{
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  });
+
+  canvas.addEventListener('pointermove', e=>{
+    if(!pointers.has(e.pointerId)) return;
+    const p = pointers.get(e.pointerId);
+    const dx = e.clientX - p.x;
+    const dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+
+    if(pointers.size === 1){
+      // drag pan (scaled by zoom)
+      camX -= dx / zoom;
+      camY -= dy / zoom;
+    } else if(pointers.size === 2){
+      const arr = Array.from(pointers.values());
+      const d = Math.hypot(arr[0].x-arr[1].x, arr[0].y-arr[1].y);
+      if(pinchDist == null) pinchDist = d;
+      const delta = d - pinchDist;
+      pinchDist = d;
+      targetZoom = clamp(targetZoom + delta*0.0022, 0.55, 3.5);
+    }
+  });
+
+  canvas.addEventListener('pointerup', e=>{
+    pointers.delete(e.pointerId);
+    if(pointers.size < 2) pinchDist = null;
+
+    // tap to focus
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const hit = pickPhoto(sx, sy);
+    if(hit){
+      const msg = ROMANTIC[ (hit.id-1) % ROMANTIC.length ];
+      showRomantic(msg, `(foto ${hit.id}.jpg)`);
+      // smooth focus: center to hit
+      focus = { id: hit.id, tx: hit.x, ty: hit.y, tz: 2.8, t:0 };
+      stFocus.textContent = `Focus: fotos/${hit.id}.jpg`;
+    }
+  });
+
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+  // Buttons
+  let musicOn=false;
+  btnMusic.onclick = async ()=>{
+    try{
+      if(!musicOn){ await music.play(); musicOn=true; btnMusic.textContent="🎵 Pause Music"; }
+      else { music.pause(); musicOn=false; btnMusic.textContent="🎵 Play Music"; }
+    }catch(err){
+      // browser needs user gesture; user already clicked but keep message simple
+      btnMusic.textContent="🎵 Play Music";
+    }
+  };
+
+  btnShuffle.onclick = ()=>{
+    generate();
+    imgCache.clear();
+    loaded = 0;
+    stLoaded.textContent = `Loaded: 0/${PHOTO_COUNT}`;
+    stFocus.textContent = `Focus: -`;
+    focus = null;
+  };
+
+  btnHome.onclick = ()=>{
+    focus = { id: null, tx: 0, ty: 0, tz: 1.0, t:0 };
+    stFocus.textContent = `Focus: -`;
+  };
+
+  // projection with fake depth:
+  // near (z small) looks bigger and moves more; far looks smaller
+  function worldToScreen(wx, wy, wz){
+    // parallax factor: near moves more
+    const par = 1.0 - wz*0.75; // far => smaller movement
+    const x = (wx - camX*par) * zoom;
+    const y = (wy - camY*par) * zoom;
+    return {x, y, par};
+  }
+
+  function drawNebula(){
+    // cheap nebula gradient + subtle noise dots
+    const w = innerWidth, h = innerHeight;
+    const g = ctx.createRadialGradient(w*0.3, h*0.35, 0, w*0.55, h*0.55, Math.max(w,h)*0.85);
+    g.addColorStop(0, "#160b2b");
+    g.addColorStop(0.35, "#0b1a35");
+    g.addColorStop(0.7, "#2a0b28");
+    g.addColorStop(1, "#05060b");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,w,h);
+
+    // soft clouds
+    ctx.globalAlpha = 0.12;
+    for(let i=0;i<4;i++){
+      const gg = ctx.createRadialGradient(w*(0.2+0.2*i), h*(0.25+0.16*i), 0, w*(0.2+0.2*i), h*(0.25+0.16*i), Math.max(w,h)*0.35);
+      gg.addColorStop(0, "rgba(120,120,255,0.9)");
+      gg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = gg;
+      ctx.beginPath(); ctx.arc(w*(0.2+0.2*i), h*(0.25+0.16*i), Math.max(w,h)*0.35, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function pickPhoto(sx, sy){
+    // only test near photos we actually render (limit 20)
+    const photos = stars.filter(s=>s.type==='photo');
+    // compute distance to "camera center" in world coords
+    const cx = camX, cy = camY;
+    const arr = photos.map(p=>{
+      const dx = p.x - cx, dy = p.y - cy;
+      const d = Math.hypot(dx, dy) + p.z*800; // far add penalty
+      return {p, d};
+    }).sort((a,b)=>a.d-b.d).slice(0, LIMIT_NEAR);
+
+    // check in reverse draw order (near first)
+    for(const o of arr){
+      const p = o.p;
+      const sc = worldToScreen(p.x, p.y, p.z);
+      const px = innerWidth/2 + sc.x;
+      const py = innerHeight/2 + sc.y;
+
+      const depthScale = (1.35 - p.z*0.85); // far smaller
+      const ww = p.w * depthScale;
+      const hh = p.h * depthScale;
+
+      // rotated rect hit (approx using AABB, enough)
+      if (sx >= px-ww/2 && sx <= px+ww/2 && sy >= py-hh/2 && sy <= py+hh/2){
+        return p;
+      }
+    }
+    return null;
+  }
+
+  function draw(){
+    // smooth zoom
+    zoom += (targetZoom - zoom) * 0.10;
+    stZoom.textContent = `Zoom: ${zoom.toFixed(2)}`;
+
+    // focus animation
+    if(focus){
+      focus.t += 1/60;
+      const k = clamp(focus.t/0.55, 0, 1);
+      const s = k*k*(3-2*k);
+      camX += (focus.tx - camX) * (0.08 + 0.22*s);
+      camY += (focus.ty - camY) * (0.08 + 0.22*s);
+      targetZoom += (focus.tz - targetZoom) * (0.08 + 0.22*s);
+      if(k>=1){
+        // keep following (small magnet) when focused
+        if(focus.id){
+          const p = stars.find(x=>x.type==='photo' && x.id===focus.id);
+          if(p){
+            camX += (p.x - camX) * 0.06;
+            camY += (p.y - camY) * 0.06;
+          }
+        } else {
+          focus = null;
+        }
+      }
+    }
+
+    drawNebula();
+
+    // draw star dots (cheap)
+    ctx.save();
+    ctx.translate(innerWidth/2, innerHeight/2);
+
+    // stars dots
+    for(const s of stars){
+      if(s.type!=='dot') continue;
+      const sc = worldToScreen(s.x, s.y, s.z);
+      const x = sc.x, y = sc.y;
+      const size = s.r * (1.2 - s.z*0.8);
+      const alpha = s.a * (1.0 - s.z*0.55);
+      // cull offscreen
+      if(x < -innerWidth || x > innerWidth || y < -innerHeight || y > innerHeight) continue;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // choose near photos
+    const photos = stars.filter(s=>s.type==='photo');
+    const cx = camX, cy = camY;
+    const near = photos.map(p=>{
+      const dx = p.x - cx, dy = p.y - cy;
+      const d = Math.hypot(dx, dy) + p.z*800;
+      return {p, d};
+    }).sort((a,b)=>a.d-b.d).slice(0, LIMIT_NEAR);
+
+    stNear.textContent = `Near: ${near.length}/${LIMIT_NEAR}`;
+
+    // draw far to near (so near on top)
+    near.sort((a,b)=>(b.p.z - a.p.z)); // far first (bigger z)
+    for(const o of near){
+      const p = o.p;
+      const sc = worldToScreen(p.x, p.y, p.z);
+      const x = sc.x, y = sc.y;
+
+      const depthScale = (1.35 - p.z*0.85);
+      const ww = p.w * depthScale;
+      const hh = p.h * depthScale;
+
+      // hide if too far at current zoom (so zoom out = fewer photos)
+      // => bikin “bintang” feel: jauh jadi hilang
+      const appear = clamp((zoom - 0.6) * 1.15, 0, 1) * clamp(1.2 - p.z, 0, 1);
+      if(appear < 0.08) continue;
+
+      const img = getImg(p.id);
+      // draw with slight glow
+      ctx.save();
+      ctx.globalAlpha = 0.85 * appear;
+      ctx.translate(x, y);
+      ctx.rotate(p.rot);
+      // glow
+      ctx.globalAlpha = 0.20 * appear;
+      ctx.fillStyle = "rgba(120,160,255,1)";
+      ctx.fillRect(-ww/2-6, -hh/2-6, ww+12, hh+12);
+      // image
+      ctx.globalAlpha = 0.95 * appear;
+      ctx.drawImage(img, -ww/2, -hh/2, ww, hh);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    requestAnimationFrame(draw);
+  }
+
+  // init label
+  stLoaded.textContent = `Loaded: 0/${PHOTO_COUNT}`;
+  draw();
+
+})();
+</script>
+</body>
+</html>
