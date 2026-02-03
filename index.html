@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>planet-bini1</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden}
+    /* FULLSCREEN canvas: biar gak 0px di HP */
+    #stage{position:fixed;inset:0;touch-action:none;background:#000}
+    canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+    #ui{
+      position:fixed;left:12px;top:12px;z-index:5;
+      color:rgba(255,255,255,.92);
+      background:rgba(0,0,0,.45);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;
+      padding:10px 12px;
+      backdrop-filter: blur(12px);
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      max-width: 360px;
+    }
+    #ui .title{font-weight:800;font-size:12px;margin-bottom:6px}
+    #ui .mut{font-size:11px;opacity:.78;line-height:1.35}
+    #ui .row{display:flex;gap:8px;margin-top:8px}
+    #ui button{
+      flex:1;cursor:pointer;border-radius:12px;padding:10px 10px;
+      border:1px solid rgba(255,255,255,.16);
+      background:rgba(255,255,255,.06);
+      color:#fff;font-size:12px;
+    }
+    #ui button:active{transform:scale(.98)}
+    #pill{
+      display:inline-block;margin-top:6px;
+      padding:4px 8px;border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      font-size:11px;opacity:.9;
+    }
+
+    #err{
+      position:fixed;inset:0;display:none;z-index:9999;
+      background:rgba(0,0,0,.92);color:#fff;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      padding:14px;
+      overflow:auto;
+      white-space:pre-wrap;
+    }
+    #err b{color:#ff6b6b}
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c"></canvas>
+
+    <div id="ui">
+      <div class="title">🌌 Nebula Photo Adventure</div>
+      <div class="mut">
+        - folder: <b>fotos/1.jpg .. 43.jpg</b><br>
+        - musik: <b>music.mp3</b> (wajib nama persis)<br>
+        - hanya 20 meteor terdekat pakai foto (hemat HP)
+      </div>
+      <div class="row">
+        <button id="play">▶ Play</button>
+        <button id="pause">⏸ Pause</button>
+      </div>
+      <div class="row">
+        <button id="tour">🧭 Auto Tour: ON</button>
+        <button id="shuffle">🎲 Shuffle</button>
+      </div>
+      <div id="pill">Beat: 0.00 • Loaded: 0 • Photo: 0/20</div>
+    </div>
+
+    <audio id="music" src="music.mp3" loop preload="auto"></audio>
+  </div>
+
+  <div id="err"></div>
+
+<script>
+(() => {
+  const errBox = document.getElementById('err');
+  function showErr(msg){
+    errBox.style.display = 'block';
+    errBox.innerHTML =
+`<b>ERROR</b>\n${msg}\n\nCek cepat:
+1) Pastikan file: music.mp3 (nama persis) ada di root repo
+2) Pastikan folder: fotos/ berisi 1.jpg..43.jpg (semua .jpg)
+3) Reload halaman (Chrome > titik 3 > Refresh)\n`;
+  }
+  window.addEventListener('error', (e)=>showErr(e.message + "\\n" + (e.filename||"") + ":" + (e.lineno||"") ), true);
+  window.addEventListener('unhandledrejection', (e)=>showErr(String(e.reason||e)), true);
+
+  // ========= CANVAS =========
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+
+  // DPR aman di HP
+  const DPR = Math.min(1.25, (window.devicePixelRatio || 1));
+
+  function resize(){
+    const w = Math.max(1, innerWidth);
+    const h = Math.max(1, innerHeight);
+    canvas.width  = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // ========= ASSETS =========
+  const TEX_COUNT = 43;
+  const METEOR_COUNT = 180;
+  const PHOTO_LIMIT = 20;
+
+  const textures = [];
+  async function loadImg(src){
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+  }
+
+  (async ()=>{
+    for(let i=1;i<=TEX_COUNT;i++){
+      const img = await loadImg(`fotos/${i}.jpg`);
+      if(img) textures.push(img);
+    }
+  })();
+
+  // ========= STARFIELD =========
+  const stars = [];
+  const FIELD = 3200;
+  for(let i=0;i<520;i++){
+    stars.push({
+      x:(Math.random()-0.5)*FIELD,
+      y:(Math.random()-0.5)*FIELD,
+      z:(Math.random()-0.5)*FIELD,
+      a: Math.random()*0.9 + 0.1,
+      s: Math.random()*1.15 + 0.35
+    });
+  }
+
+  // ========= METEORS (Renggang) =========
+  const rand = (a,b)=> a + Math.random()*(b-a);
+  function powRand(min,max,pow){
+    const t = Math.pow(Math.random(), pow);
+    return min + (max-min)*t;
+  }
+  const ORBIT_MIN = 320, ORBIT_MAX = 2200;
+  function makeMeteors(){
+    const arr = [];
+    for(let i=0;i<METEOR_COUNT;i++){
+      const radius = powRand(ORBIT_MIN, ORBIT_MAX, 0.35);
+      const angle  = rand(0, Math.PI*2);
+      const height = rand(-900, 900) * (radius/ORBIT_MAX);
+      const tiltX  = rand(-1.0, 1.0);
+      const tiltZ  = rand(-1.0, 1.0);
+      const speed  = rand(0.0009, 0.0034) * (ORBIT_MIN / Math.max(radius, ORBIT_MIN));
+      const size   = rand(20, 56);
+      arr.push({ radius, angle, height, tiltX, tiltZ, speed, size, texIdx:i, seed:Math.random()*9999 });
+    }
+    return arr;
+  }
+  let meteors = makeMeteors();
+
+  // ========= AUDIO (hanya saat klik) =========
+  const music = document.getElementById('music');
+  const playBtn = document.getElementById('play');
+  const pauseBtn = document.getElementById('pause');
+  const tourBtn = document.getElementById('tour');
+  const shuffleBtn = document.getElementById('shuffle');
+  const pill = document.getElementById('pill');
+
+  let audioCtx=null, analyser=null, dataArray=null;
+  let beat = 0;
+
+  function setupAudio(){
+    if(audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    const src = audioCtx.createMediaElementSource(music);
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  playBtn.onclick = async ()=>{
+    try{
+      setupAudio();
+      if(audioCtx.state !== 'running') await audioCtx.resume();
+      await music.play();
+    }catch(e){
+      showErr("Gagal play musik: " + e);
+    }
+  };
+  pauseBtn.onclick = ()=> music.pause();
+
+  function calcBeat(){
+    if(!analyser){ beat = 0; return; }
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    const start = 2;
+    const end = Math.floor(dataArray.length * 0.22);
+    for(let i=start;i<end;i++) sum += dataArray[i];
+    const avg = sum / (end-start) / 255;
+    beat = Math.max(0, Math.min(1, avg * 1.7));
+  }
+
+  // ========= CAMERA =========
+  const cam = { x:0, y:120, z:980, targetX:0, targetY:0, targetZ:0, fov:640, fovMin:360, fovMax:980 };
+  let autoTour = true;
+  let dragging=false, lastX=0, lastY=0;
+  let yaw=0, pitch=0;
+
+  const stage = document.getElementById('stage');
+  stage.addEventListener('pointerdown', (e)=>{
+    dragging=true; lastX=e.clientX; lastY=e.clientY;
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-lastX, dy=e.clientY-lastY;
+    lastX=e.clientX; lastY=e.clientY;
+    yaw += dx * 0.006;
+    pitch += dy * 0.004;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  });
+  stage.addEventListener('pointerup', ()=> dragging=false);
+
+  stage.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    cam.fov = Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov + e.deltaY*0.70));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  }, {passive:false});
+
+  tourBtn.onclick = ()=>{
+    autoTour = !autoTour;
+    tourBtn.textContent = autoTour ? "🧭 Auto Tour: ON" : "🧭 Auto Tour: OFF";
+  };
+  shuffleBtn.onclick = ()=>{ meteors = makeMeteors(); };
+
+  // ========= PROJECTION =========
+  function project(px,py,pz){
+    const tx=cam.targetX, ty=cam.targetY, tz=cam.targetZ;
+    let dx=tx-cam.x, dy=ty-cam.y, dz=tz-cam.z;
+    const dl=Math.hypot(dx,dy,dz)||1;
+    dx/=dl; dy/=dl; dz/=dl;
+
+    const upx=0, upy=1, upz=0;
+
+    let rx=dy*upz - dz*upy;
+    let ry=dz*upx - dx*upz;
+    let rz=dx*upy - dy*upx;
+    const rl=Math.hypot(rx,ry,rz)||1;
+    rx/=rl; ry/=rl; rz/=rl;
+
+    let ux=ry*dz - rz*dy;
+    let uy=rz*dx - rx*dz;
+    let uz=rx*dy - ry*dx;
+
+    const x=px-cam.x, y=py-cam.y, z=pz-cam.z;
+    const cx=x*rx + y*ry + z*rz;
+    const cy=x*ux + y*uy + z*uz;
+    const cz=x*dx + y*dy + z*dz;
+
+    const f = cam.fov / (cam.fov + cz);
+    const w=canvas.width, h=canvas.height;
+    return { sx:w/2 + cx*f, sy:h/2 - cy*f, f, cz, cx, cy };
+  }
+
+  // zoom push (efek kamera: jauh makin menjauh)
+  const DEPTH_NEAR=80, DEPTH_FAR=2600;
+  const ZOOM_PUSH=0.70;
+  function zoomPush(p){
+    const z = (cam.fovMax - cam.fov) / (cam.fovMax - cam.fovMin);
+    const dn = Math.max(0, Math.min(1, (p.cz-DEPTH_NEAR)/(DEPTH_FAR-DEPTH_NEAR)));
+    const depthBoost = (1.25 - dn);
+    const push = z * ZOOM_PUSH * depthBoost;
+
+    const w=canvas.width, h=canvas.height;
+    const cx=w/2, cy=h/2;
+    const vx=p.sx-cx, vy=p.sy-cy;
+    return { sx: cx + vx*(1+push), sy: cy + vy*(1+push) };
+  }
+
+  function rotateXZ(x,y,z, tiltX, tiltZ){
+    const cx=Math.cos(tiltX), sx=Math.sin(tiltX);
+    let y1=y*cx - z*sx;
+    let z1=y*sx + z*cx;
+    const cz=Math.cos(tiltZ), sz=Math.sin(tiltZ);
+    let x2=x*cz - y1*sz;
+    let y2=x*sz + y1*cz;
+    return {x:x2,y:y2,z:z1};
+  }
+
+  // ========= DRAW =========
+  function drawNebula(){
+    const w=canvas.width, h=canvas.height;
+    ctx.fillStyle="#000"; ctx.fillRect(0,0,w,h);
+
+    const g=ctx.createRadialGradient(w*0.35,h*0.30,10,w*0.5,h*0.55,Math.max(w,h));
+    g.addColorStop(0,"rgba(0,180,255,0.15)");
+    g.addColorStop(0.35,"rgba(255,0,200,0.13)");
+    g.addColorStop(0.70,"rgba(0,255,160,0.10)");
+    g.addColorStop(1,"rgba(0,0,0,1)");
+    ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+
+    ctx.globalAlpha=0.10;
+    for(let i=0;i<160;i++){
+      const x=Math.random()*w, y=Math.random()*h, r=Math.random()*120+20;
+      const gg=ctx.createRadialGradient(x,y,0,x,y,r);
+      gg.addColorStop(0,`rgba(255,255,255,${0.06+Math.random()*0.10})`);
+      gg.addColorStop(1,"rgba(0,0,0,0)");
+      ctx.fillStyle=gg;
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+
+    // core nebula glow
+    const p=project(0,0,0);
+    const R=(260*p.f);
+    ctx.save();
+    ctx.globalCompositeOperation="lighter";
+    const glow=ctx.createRadialGradient(p.sx,p.sy,R*0.15,p.sx,p.sy,R*3.0);
+    glow.addColorStop(0,`rgba(255,255,255,${0.20+beat*0.22})`);
+    glow.addColorStop(0.25,`rgba(0,190,255,${0.16+beat*0.20})`);
+    glow.addColorStop(0.55,`rgba(255,0,200,${0.11+beat*0.18})`);
+    glow.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle=glow;
+    ctx.beginPath(); ctx.arc(p.sx,p.sy,R*3.0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // stars
+    for(const s of stars){
+      const ps=project(s.x,s.y,s.z);
+      if(ps.cz < -cam.fov*0.8) continue;
+      const a=Math.max(0,Math.min(1,s.a*ps.f));
+      const r=s.s*ps.f;
+      ctx.globalAlpha=a*0.85;
+      ctx.fillStyle="white";
+      ctx.beginPath(); ctx.arc(ps.sx,ps.sy,r,0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+
+  function drawPhoto(tex,sx,sy,r,alpha){
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    // glow
+    ctx.save();
+    ctx.globalCompositeOperation="lighter";
+    const g=ctx.createRadialGradient(sx,sy,r*0.2,sx,sy,r*2.0);
+    g.addColorStop(0,`rgba(255,255,255,${0.16+beat*0.20})`);
+    g.addColorStop(0.6,`rgba(80,180,255,${0.10+beat*0.18})`);
+    g.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle=g;
+    ctx.beginPath(); ctx.arc(sx,sy,r*2.0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath(); ctx.arc(sx,sy,r,0,Math.PI*2); ctx.clip();
+    ctx.drawImage(tex,sx-r,sy-r,r*2,r*2);
+    ctx.restore();
+
+    ctx.strokeStyle="rgba(255,255,255,0.14)";
+    ctx.lineWidth=Math.max(1,r*0.06);
+    ctx.beginPath(); ctx.arc(sx,sy,r,0,Math.PI*2); ctx.stroke();
+  }
+
+  function drawDot(sx,sy,r,alpha){
+    ctx.globalAlpha=alpha*0.58;
+    ctx.fillStyle="rgba(255,255,255,0.95)";
+    ctx.beginPath(); ctx.arc(sx,sy,Math.max(1.2,r*0.22),0,Math.PI*2); ctx.fill();
+
+    ctx.globalAlpha=alpha*0.28;
+    ctx.fillStyle=`rgba(80,180,255,${0.09+beat*0.12})`;
+    ctx.beginPath(); ctx.arc(sx,sy,r*0.95,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1;
+  }
+
+  // ========= LOOP =========
+  let t=0;
+  const MIN_DRAW_R=5.5, DOT_R_MAX=18;
+
+  function updateCamera(){
+    cam.targetX=0; cam.targetY=0; cam.targetZ=0;
+    if(autoTour){
+      const a=t*0.18;
+      cam.x=Math.cos(a)*(980-beat*120);
+      cam.z=Math.sin(a)*(980-beat*120);
+      cam.y=180+Math.sin(a*0.8)*120;
+
+      const zWave=(Math.sin(t*0.22)*0.5+0.5);
+      cam.fov=cam.fovMax - zWave*(cam.fovMax-cam.fovMin)*0.90 - beat*70;
+      cam.fov=Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov));
+    }else{
+      const dist=980;
+      cam.x=Math.cos(yaw)*Math.cos(pitch)*dist;
+      cam.z=Math.sin(yaw)*Math.cos(pitch)*dist;
+      cam.y=Math.sin(pitch)*dist*0.60;
+    }
+  }
+
+  function frame(){
+    calcBeat();
+    drawNebula();
+
+    t += 0.016;
+    updateCamera();
+
+    const list=[];
+    const speedMul=1+beat*0.85;
+
+    for(const m of meteors){
+      m.angle += m.speed*speedMul;
+
+      const ca=Math.cos(m.angle), sa=Math.sin(m.angle);
+      let x=ca*m.radius, z=sa*m.radius;
+      let y=m.height + Math.sin(m.angle*2.0 + m.seed)*(10+beat*14);
+
+      const rot=rotateXZ(x,y,z,m.tiltX,m.tiltZ);
+      x=rot.x; y=rot.y; z=rot.z;
+
+      const p=project(x,y,z);
+      if(p.cz < DEPTH_NEAR || p.cz > DEPTH_FAR) continue;
+
+      let r=(m.size*p.f)*0.62;
+      if(r<MIN_DRAW_R) continue;
+
+      const dn=(p.cz-DEPTH_NEAR)/(DEPTH_FAR-DEPTH_NEAR);
+      if(dn>0.80) continue;
+
+      const alpha=Math.max(0.10, Math.min(1, 1.18-dn));
+      const pushed=zoomPush(p);
+
+      const dx=x-cam.x, dy=y-cam.y, dz=z-cam.z;
+      const dist=Math.hypot(dx,dy,dz);
+
+      list.push({m, sx:pushed.sx, sy:pushed.sy, r, alpha, dist, dn, cz:p.cz});
+    }
+
+    // choose nearest 20 for photo
+    list.sort((a,b)=>a.dist-b.dist);
+    const photoSet=new Set();
+    for(let i=0;i<list.length && photoSet.size<PHOTO_LIMIT;i++){
+      const it=list[i];
+      if(it.dn<=0.70 && it.r>=DOT_R_MAX) photoSet.add(it.m);
+    }
+
+    // draw far->near
+    list.sort((a,b)=>a.cz-b.cz);
+
+    let photoCount=0;
+    for(const it of list){
+      const isPhoto = photoSet.has(it.m) && textures.length;
+      if(!isPhoto){
+        if(it.r < DOT_R_MAX && it.dn > 0.62) continue;
+        drawDot(it.sx,it.sy,it.r,it.alpha);
+        continue;
+      }
+      const tex=textures[it.m.texIdx % textures.length];
+      drawPhoto(tex,it.sx,it.sy,it.r,it.alpha);
+      photoCount++;
+    }
+
+    pill.textContent = `Beat: ${beat.toFixed(2)} • Loaded: ${textures.length}/${TEX_COUNT} • Photo: ${photoCount}/${PHOTO_LIMIT}`;
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
