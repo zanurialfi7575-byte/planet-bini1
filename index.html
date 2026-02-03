@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nebula Bini — Meteor Photo Adventure (9:16)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden}
+    #stage{
+      position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+      width:min(100vw, calc(100vh * 9/16));
+      height:min(100vh, calc(100vw * 16/9));
+      background:#000;overflow:hidden;
+      touch-action:none;
+    }
+    canvas{display:block;width:100%;height:100%}
+
+    #ui{
+      position:absolute;left:12px;top:12px;z-index:5;
+      color:rgba(255,255,255,.92);
+      background:rgba(0,0,0,.45);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;
+      padding:10px 12px;
+      backdrop-filter: blur(12px);
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      max-width: 360px;
+    }
+    #ui .title{font-weight:800;font-size:12px;margin-bottom:6px}
+    #ui .mut{font-size:11px;opacity:.78;line-height:1.35}
+    #ui .row{display:flex;gap:8px;margin-top:8px}
+    #ui button{
+      flex:1;cursor:pointer;border-radius:12px;padding:10px 10px;
+      border:1px solid rgba(255,255,255,.16);
+      background:rgba(255,255,255,.06);
+      color:#fff;font-size:12px;
+    }
+    #ui button:hover{background:rgba(255,255,255,.10)}
+    #pill{
+      display:inline-block;margin-top:6px;
+      padding:4px 8px;border-radius:999px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      font-size:11px;opacity:.9;
+    }
+    #tip{
+      position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
+      font-size:11px;color:rgba(255,255,255,.55);
+      background:rgba(0,0,0,.25);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:999px;padding:6px 10px;
+      backdrop-filter: blur(10px);
+      pointer-events:none;
+      z-index:5;
+      text-align:center;
+      max-width: 92%;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c"></canvas>
+
+    <div id="ui">
+      <div class="title">🌌 Nebula Photo Adventure (9:16)</div>
+      <div class="mut">
+        - foto cuma muncul untuk 20 meteor TERDEKAT<br>
+        - jauh jadi dot / hilang (hemat HP) + lebih renggang<br>
+        - drag rotate • scroll/pinch zoom<br>
+        - musik butuh klik (aturan browser)
+      </div>
+      <div class="row">
+        <button id="play">▶ Play</button>
+        <button id="pause">⏸ Pause</button>
+      </div>
+      <div class="row">
+        <button id="tour">🧭 Auto Tour: ON</button>
+        <button id="shuffle">🎲 Shuffle</button>
+      </div>
+      <div id="pill">Beat: 0.00 • Photo: 0/20</div>
+    </div>
+
+    <div id="tip">Double tap fullscreen • Drag rotate • Zoom = kamera (yang jauh menjauh)</div>
+
+    <audio id="music" src="music.mp3" loop preload="auto"></audio>
+  </div>
+
+<script>
+(() => {
+  // =======================
+  // PERFORMANCE SETTINGS
+  // =======================
+  const DPR = 1; // paksa ringan buat HP
+
+  // =======================
+  // USER SETTINGS
+  // =======================
+  const TEX_COUNT = 43;        // fotos/1.jpg..43.jpg
+  const METEOR_COUNT = 180;    // jumlah meteor total (tapi jauh kebanyakan jadi dot/skip)
+  const PHOTO_LIMIT = 20;      // ✅ cuma 20 meteor terdekat render foto
+
+  // Nebula core (ganti planet)
+  const NEBULA_R = 260;
+
+  // Sebaran meteor dibuat 3D, dan jauh dibuat makin "renggang"
+  const ORBIT_MIN = 320;
+  const ORBIT_MAX = 2200;
+
+  const DEPTH_NEAR = 80;
+  const DEPTH_FAR  = 2600;
+
+  const MIN_DRAW_R = 5.5;     // kalau terlalu kecil, skip
+  const DOT_R_MAX  = 18;      // kecil / agak jauh => dot
+
+  // zoom push
+  const ZOOM_PUSH = 0.70;
+
+  // =======================
+  // CANVAS
+  // =======================
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  const stage = document.getElementById('stage');
+  const pill = document.getElementById('pill');
+
+  function resize(){
+    const w = stage.clientWidth;
+    const h = stage.clientHeight;
+    canvas.width  = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+  addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // =======================
+  // LOAD IMAGES
+  // =======================
+  const textures = [];
+  function loadImg(src){
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+  }
+
+  (async ()=>{
+    for(let i=1;i<=TEX_COUNT;i++){
+      const img = await loadImg(`fotos/${i}.jpg`);
+      if(img) textures.push(img);
+    }
+    if(!textures.length){
+      alert("Gagal load fotos/1.jpg dst. Cek folder 'fotos' dan nama file .jpg");
+    }
+  })();
+
+  // =======================
+  // STARFIELD (ringan)
+  // =======================
+  const stars = [];
+  const FIELD = 3200;
+  for(let i=0;i<520;i++){
+    stars.push({
+      x:(Math.random()-0.5)*FIELD,
+      y:(Math.random()-0.5)*FIELD,
+      z:(Math.random()-0.5)*FIELD,
+      a: Math.random()*0.9 + 0.1,
+      s: Math.random()*1.15 + 0.35
+    });
+  }
+
+  // =======================
+  // METEORS — "TIDAK DEMPET"
+  // trik: radius banyak yang besar + density falloff
+  // =======================
+  const rand = (a,b)=> a + Math.random()*(b-a);
+  function powRand(min,max,pow){
+    // lebih banyak nilai besar => meteor jauh makin renggang
+    const t = Math.pow(Math.random(), pow);
+    return min + (max-min)*t;
+  }
+
+  function makeMeteors(){
+    const arr = [];
+    for(let i=0;i<METEOR_COUNT;i++){
+      // IMPORTANT:
+      // pakai pow kecil (0.35) supaya banyak meteor menyebar jauh (renggang, tidak numpuk di tengah)
+      const radius = powRand(ORBIT_MIN, ORBIT_MAX, 0.35);
+      const angle  = rand(0, Math.PI*2);
+
+      // y sebar lebih lebar untuk 3D
+      const height = rand(-900, 900) * (radius/ORBIT_MAX);
+
+      // orbit plane tilt random
+      const tiltX  = rand(-1.0, 1.0);
+      const tiltZ  = rand(-1.0, 1.0);
+
+      const speed  = rand(0.0009, 0.0034) * (ORBIT_MIN / Math.max(radius, ORBIT_MIN));
+      const size   = rand(20, 56);
+
+      arr.push({
+        radius, angle, height, tiltX, tiltZ, speed, size,
+        texIdx: i, seed: Math.random()*9999
+      });
+    }
+    return arr;
+  }
+
+  let meteors = makeMeteors();
+
+  // =======================
+  // AUDIO + BEAT
+  // =======================
+  const music = document.getElementById('music');
+  const playBtn = document.getElementById('play');
+  const pauseBtn = document.getElementById('pause');
+  const tourBtn = document.getElementById('tour');
+  const shuffleBtn = document.getElementById('shuffle');
+
+  let audioCtx, analyser, dataArray;
+  let beat = 0;
+
+  function setupAudio(){
+    if(audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    const src = audioCtx.createMediaElementSource(music);
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  }
+
+  playBtn.onclick = async ()=>{
+    try{
+      setupAudio();
+      if(audioCtx.state !== 'running') await audioCtx.resume();
+      await music.play();
+    }catch(e){
+      alert("Gagal play. Pastikan file music.mp3 ada sejajar index.html");
+    }
+  };
+  pauseBtn.onclick = ()=> music.pause();
+
+  function calcBeat(){
+    if(!analyser){ beat = 0; return; }
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    const start = 2;
+    const end = Math.floor(dataArray.length * 0.22);
+    for(let i=start;i<end;i++) sum += dataArray[i];
+    const avg = sum / (end-start) / 255;
+    beat = Math.max(0, Math.min(1, avg * 1.7));
+  }
+
+  // =======================
+  // CAMERA
+  // =======================
+  const cam = {
+    x: 0, y: 120, z: 980,
+    targetX: 0, targetY: 0, targetZ: 0,
+    fov: 640,
+    fovMin: 360,
+    fovMax: 980
+  };
+
+  let autoTour = true;
+  let dragging=false, lastX=0, lastY=0;
+  let yaw=0, pitch=0;
+
+  stage.addEventListener('pointerdown', (e)=>{
+    dragging=true; lastX=e.clientX; lastY=e.clientY;
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointermove', (e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-lastX, dy=e.clientY-lastY;
+    lastX=e.clientX; lastY=e.clientY;
+    yaw += dx * 0.006;
+    pitch += dy * 0.004;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  });
+  stage.addEventListener('pointerup', ()=> dragging=false);
+
+  stage.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    cam.fov = Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov + e.deltaY*0.70));
+    autoTour = false;
+    tourBtn.textContent = "🧭 Auto Tour: OFF";
+  }, {passive:false});
+
+  // double tap fullscreen
+  let lastTap=0;
+  stage.addEventListener('touchend', async ()=>{
+    const now = Date.now();
+    if(now - lastTap < 280){
+      try{
+        if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+        else await document.exitFullscreen();
+      }catch(e){}
+    }
+    lastTap = now;
+  }, {passive:true});
+
+  tourBtn.onclick = ()=>{
+    autoTour = !autoTour;
+    tourBtn.textContent = autoTour ? "🧭 Auto Tour: ON" : "🧭 Auto Tour: OFF";
+  };
+  shuffleBtn.onclick = ()=>{ meteors = makeMeteors(); };
+
+  // =======================
+  // PROJECTION (simple look-at)
+  // =======================
+  function project(px,py,pz){
+    const tx = cam.targetX, ty = cam.targetY, tz = cam.targetZ;
+
+    let dx = tx - cam.x, dy = ty - cam.y, dz = tz - cam.z;
+    const dl = Math.hypot(dx,dy,dz) || 1;
+    dx/=dl; dy/=dl; dz/=dl;
+
+    const upx=0, upy=1, upz=0;
+
+    let rx = dy*upz - dz*upy;
+    let ry = dz*upx - dx*upz;
+    let rz = dx*upy - dy*upx;
+    const rl = Math.hypot(rx,ry,rz) || 1;
+    rx/=rl; ry/=rl; rz/=rl;
+
+    let ux = ry*dz - rz*dy;
+    let uy = rz*dx - rx*dz;
+    let uz = rx*dy - ry*dx;
+
+    const x = px - cam.x, y = py - cam.y, z = pz - cam.z;
+
+    const cx = x*rx + y*ry + z*rz;
+    const cy = x*ux + y*uy + z*uz;
+    const cz = x*dx + y*dy + z*dz;
+
+    const f = cam.fov / (cam.fov + cz);
+    const w = canvas.width;
+    const h = canvas.height;
+    const sx = w/2 + cx * f;
+    const sy = h/2 - cy * f;
+
+    return { sx, sy, f, cz, cx, cy };
+  }
+
+  // zoom push (screen space)
+  function applyZoomPush(p){
+    const z = (cam.fovMax - cam.fov) / (cam.fovMax - cam.fovMin); // 0..1
+    const dn = Math.max(0, Math.min(1, (p.cz - DEPTH_NEAR) / (DEPTH_FAR - DEPTH_NEAR)));
+    const depthBoost = (1.25 - dn);
+    const push = z * ZOOM_PUSH * depthBoost;
+
+    const w = canvas.width, h = canvas.height;
+    const cx = w/2, cy = h/2;
+    const vx = p.sx - cx;
+    const vy = p.sy - cy;
+
+    return { sx: cx + vx * (1 + push), sy: cy + vy * (1 + push) };
+  }
+
+  // =======================
+  // NEBULA (procedural, bukan foto)
+  // =======================
+  function drawNebulaBackground(){
+    const w = canvas.width, h = canvas.height;
+
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,w,h);
+
+    // gradient base
+    const g = ctx.createRadialGradient(w*0.35, h*0.30, 10, w*0.5, h*0.55, Math.max(w,h));
+    g.addColorStop(0, "rgba(0,180,255,0.15)");
+    g.addColorStop(0.35, "rgba(255,0,200,0.13)");
+    g.addColorStop(0.70, "rgba(0,255,160,0.10)");
+    g.addColorStop(1, "rgba(0,0,0,1)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,w,h);
+
+    // noise speckle (murah)
+    ctx.globalAlpha = 0.10;
+    for(let i=0;i<220;i++){
+      const x = Math.random()*w;
+      const y = Math.random()*h;
+      const r = Math.random()*140 + 20;
+      const gg = ctx.createRadialGradient(x,y,0,x,y,r);
+      gg.addColorStop(0, `rgba(255,255,255,${0.06+Math.random()*0.12})`);
+      gg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = gg;
+      ctx.beginPath();
+      ctx.arc(x,y,r,0,Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStars(){
+    for(const s of stars){
+      const p = project(s.x, s.y, s.z);
+      if(p.cz < -cam.fov*0.8) continue;
+      const a = Math.max(0, Math.min(1, s.a * p.f));
+      const r = s.s * p.f;
+      ctx.globalAlpha = a * 0.85;
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawNebulaCore(){
+    const p = project(0,0,0);
+    const R = NEBULA_R * p.f;
+
+    // outer bloom
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const glow = ctx.createRadialGradient(p.sx, p.sy, R*0.15, p.sx, p.sy, R*3.2);
+    glow.addColorStop(0, `rgba(255,255,255,${0.22 + beat*0.22})`);
+    glow.addColorStop(0.25, `rgba(0,190,255,${0.18 + beat*0.20})`);
+    glow.addColorStop(0.55, `rgba(255,0,200,${0.12 + beat*0.18})`);
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, R*3.2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // inner core
+    const core = ctx.createRadialGradient(p.sx - R*0.1, p.sy - R*0.1, R*0.1, p.sx, p.sy, R*1.25);
+    core.addColorStop(0, "rgba(255,255,255,0.90)");
+    core.addColorStop(0.35, "rgba(180,255,240,0.40)");
+    core.addColorStop(0.72, "rgba(40,120,255,0.16)");
+    core.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = core;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, R*1.25, 0, Math.PI*2);
+    ctx.fill();
+
+    // vignette
+    const w = canvas.width, h = canvas.height;
+    const vg = ctx.createRadialGradient(w*0.5, h*0.55, Math.min(w,h)*0.12, w*0.5, h*0.55, Math.max(w,h)*0.78);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.88)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,w,h);
+  }
+
+  function drawMeteorPhoto(tex, sx, sy, r, glowA){
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sx, sy, r*0.2, sx, sy, r*2.0);
+    g.addColorStop(0, `rgba(255,255,255,${0.18 + glowA})`);
+    g.addColorStop(0.55, `rgba(80,180,255,${0.10 + glowA*0.9})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r*2.0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI*2);
+    ctx.clip();
+    ctx.drawImage(tex, sx - r, sy - r, r*2, r*2);
+    ctx.restore();
+
+    ctx.strokeStyle = "rgba(255,255,255,0.14)";
+    ctx.lineWidth = Math.max(1, r*0.06);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  function drawMeteorDot(sx, sy, r, a){
+    ctx.globalAlpha = a * 0.58;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(1.2, r*0.22), 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.globalAlpha = a * 0.30;
+    ctx.fillStyle = `rgba(80,180,255,${0.09 + beat*0.12})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r*0.95, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  }
+
+  // =======================
+  // LOOP
+  // =======================
+  let t = 0;
+
+  function updateCamera(){
+    cam.targetX = 0; cam.targetY = 0; cam.targetZ = 0;
+
+    if(autoTour){
+      const a = t*0.18;
+      cam.x = Math.cos(a) * (980 - beat*120);
+      cam.z = Math.sin(a) * (980 - beat*120);
+      cam.y = 180 + Math.sin(a*0.8) * 120;
+
+      const zWave = (Math.sin(t*0.22)*0.5 + 0.5);
+      cam.fov = cam.fovMax - zWave * (cam.fovMax - cam.fovMin) * 0.90 - beat*70;
+      cam.fov = Math.max(cam.fovMin, Math.min(cam.fovMax, cam.fov));
+    } else {
+      const dist = 980;
+      cam.x = Math.cos(yaw) * Math.cos(pitch) * dist;
+      cam.z = Math.sin(yaw) * Math.cos(pitch) * dist;
+      cam.y = Math.sin(pitch) * dist * 0.60;
+    }
+  }
+
+  // rotate vector around X and Z for orbit plane tilt
+  function rotateXZ(x,y,z, tiltX, tiltZ){
+    // rotate around X
+    const cx = Math.cos(tiltX), sx = Math.sin(tiltX);
+    let y1 = y*cx - z*sx;
+    let z1 = y*sx + z*cx;
+
+    // rotate around Z
+    const cz = Math.cos(tiltZ), sz = Math.sin(tiltZ);
+    let x2 = x*cz - y1*sz;
+    let y2 = x*sz + y1*cz;
+
+    return {x:x2, y:y2, z:z1};
+  }
+
+  function frame(){
+    calcBeat();
+    drawNebulaBackground();
+
+    t += 0.016;
+    updateCamera();
+
+    drawStars();
+    drawNebulaCore();
+
+    // Build visible list
+    const list = [];
+    const speedMul = 1 + beat*0.85;
+
+    for(const m of meteors){
+      m.angle += m.speed * speedMul;
+
+      // orbit in XY plane then tilt 3D
+      const ca = Math.cos(m.angle), sa = Math.sin(m.angle);
+      let x = ca * m.radius;
+      let z = sa * m.radius;
+      let y = m.height + Math.sin(m.angle*2.0 + m.seed) * (10 + beat*14);
+
+      const rot = rotateXZ(x,y,z, m.tiltX, m.tiltZ);
+      x = rot.x; y = rot.y; z = rot.z;
+
+      const p = project(x,y,z);
+
+      if(p.cz < DEPTH_NEAR || p.cz > DEPTH_FAR) continue;
+
+      let r = (m.size * p.f) * 0.62;
+
+      // skip kecil banget
+      if(r < MIN_DRAW_R) continue;
+
+      const dn = (p.cz - DEPTH_NEAR) / (DEPTH_FAR - DEPTH_NEAR);
+
+      // jauh banget: skip total biar gak dempet dan hemat
+      if(dn > 0.80) continue;
+
+      // fade far
+      const alpha = Math.max(0.10, Math.min(1, 1.18 - dn));
+
+      const pushed = applyZoomPush(p);
+
+      // distance to camera for "nearest"
+      const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z;
+      const dist = Math.hypot(dx,dy,dz);
+
+      list.push({ m, sx:pushed.sx, sy:pushed.sy, r, alpha, dist, dn, cz:p.cz });
+    }
+
+    // pilih 20 meteor terdekat untuk "photo"
+    list.sort((a,b)=> a.dist - b.dist);
+    const photoSet = new Set();
+    for(let i=0;i<list.length && photoSet.size<PHOTO_LIMIT;i++){
+      const it = list[i];
+      // foto hanya kalau cukup dekat dan cukup besar
+      if(it.dn <= 0.70 && it.r >= DOT_R_MAX) photoSet.add(it.m);
+    }
+
+    // draw order: far->near
+    list.sort((a,b)=> a.cz - b.cz);
+
+    let photoCount = 0;
+
+    if(textures.length){
+      for(const it of list){
+        const isPhoto = photoSet.has(it.m);
+
+        if(!isPhoto){
+          // dot mode: kalau masih lumayan terlihat, dot, kalau kecil skip
+          if(it.r < DOT_R_MAX && it.dn > 0.62) continue; // makin jauh makin hilang
+          drawMeteorDot(it.sx, it.sy, it.r, it.alpha);
+          continue;
+        }
+
+        const tex = textures[it.m.texIdx % textures.length];
+        ctx.globalAlpha = it.alpha;
+        drawMeteorPhoto(tex, it.sx, it.sy, it.r, 0.06 + beat*0.22);
+        photoCount++;
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    pill.textContent = `Beat: ${beat.toFixed(2)} • Photo: ${photoCount}/${PHOTO_LIMIT}`;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+  </html>
