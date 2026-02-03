@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,height=device-height,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
+  <title>Nebula Photo Adventure 3D</title>
+  <style>
+    html,body{margin:0;padding:0;overflow:hidden;background:#000;touch-action:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #ui{
+      position:fixed;left:12px;top:12px;z-index:10;
+      background:rgba(18,18,26,.62);backdrop-filter:blur(10px);
+      border-radius:14px;padding:12px;color:#fff;font-size:12px;line-height:1.25;
+      max-width:min(360px,92vw)
+    }
+    #ui b{font-size:13px}
+    #ui .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    #ui button{
+      background:#24242e;border:0;color:#fff;border-radius:10px;padding:8px 10px;font-size:12px
+    }
+    #ui button:active{transform:scale(.98)}
+    #hud{
+      position:fixed;left:12px;bottom:12px;z-index:10;
+      color:#bbb;font-size:12px;opacity:.75;background:rgba(0,0,0,.35);
+      padding:8px 10px;border-radius:12px;backdrop-filter:blur(10px)
+    }
+    #love{
+      position:fixed;left:50%;top:60%;
+      transform:translate(-50%,-50%);
+      z-index:11;color:#fff;font-size:18px;text-align:center;
+      padding:14px 16px;border-radius:18px;
+      background:rgba(0,0,0,.45);backdrop-filter:blur(10px);
+      max-width:min(560px,90vw);
+      opacity:0;pointer-events:none;
+      transition:opacity .25s ease;
+      text-shadow:0 8px 22px rgba(0,0,0,.8);
+    }
+    #love small{display:block;font-size:12px;color:#ddd;opacity:.85;margin-top:6px}
+  </style>
+</head>
+<body>
+
+<div id="ui">
+  <b>🌌 Nebula Photo Adventure 3D (9:16)</b><br>
+  • Drag = puter kamera • 2 jari = zoom<br>
+  • Tap foto = kamera ngikutin<br>
+  • Hemat HP: render max <b>20</b> meteor terdekat<br>
+  <div class="row">
+    <button id="btnPlay">▶ Play</button>
+    <button id="btnPause">⏸ Pause</button>
+    <button id="btnAuto">🧭 Auto Tour: OFF</button>
+    <button id="btnShuffle">🎲 Shuffle</button>
+  </div>
+  <div class="row">
+    <button id="btnFS">⛶ Fullscreen</button>
+  </div>
+</div>
+
+<div id="love"></div>
+<div id="hud">Loading…</div>
+
+<audio id="music" src="music.mp3" loop></audio>
+
+<script type="module">
+/* =========================
+   THREE.JS (CDN)
+========================= */
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+
+/* =========================
+   CONFIG
+========================= */
+const TOTAL_PHOTO = 43;      // ubah jadi 55 kalau sudah lengkap
+const MAX_RENDER  = 20;      // render meteor terdekat (anti lag)
+const METEOR_COUNT = 1500;   // jumlah "data meteor" (bukan mesh semua)
+const R_MIN = 120;
+const R_MAX = 520;
+const ORBIT_SPEED = 0.00035; // pelan (cinematic)
+const PHOTO_ASPECT = 9/16;   // portrait
+const BASE_H = 22;           // tinggi foto di world units (kecil biar enak)
+const NEBULA_SIZE = 2200;
+
+/* =========================
+   UI + AUDIO
+========================= */
+const hud = document.getElementById("hud");
+const loveBox = document.getElementById("love");
+const music = document.getElementById("music");
+
+document.getElementById("btnPlay").onclick = ()=> music.play().catch(()=>{});
+document.getElementById("btnPause").onclick = ()=> music.pause();
+
+let autoTour = false;
+const btnAuto = document.getElementById("btnAuto");
+btnAuto.onclick = ()=> {
+  autoTour = !autoTour;
+  btnAuto.textContent = `🧭 Auto Tour: ${autoTour ? "ON" : "OFF"}`;
+  if(autoTour) followIndex = -1;
+};
+
+document.getElementById("btnFS").onclick = async ()=>{
+  try{
+    if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    else await document.exitFullscreen();
+  }catch(e){}
+};
+
+/* =========================
+   SCENE
+========================= */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.00075);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:"high-performance" });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.8));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 8000);
+camera.position.set(0, 140, 520);
+
+/* =========================
+   RESIZE
+========================= */
+addEventListener("resize", ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* =========================
+   LIGHTS
+========================= */
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 0.65);
+key.position.set(300, 600, 500);
+scene.add(key);
+
+/* =========================
+   BACKGROUND: STARS + NEBULA (Sprite)
+========================= */
+function makeStars(count=2500){
+  const g = new THREE.BufferGeometry();
+  const pos = new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    const r = 2000 + Math.random()*2500;
+    const a = Math.random()*Math.PI*2;
+    const b = (Math.random()*2-1) * 0.8; // bias
+    const x = Math.cos(a)*r;
+    const z = Math.sin(a)*r;
+    const y = b*r*0.22 + (Math.random()*2-1)*600;
+    pos[i*3+0]=x; pos[i*3+1]=y; pos[i*3+2]=z;
+  }
+  g.setAttribute("position", new THREE.BufferAttribute(pos,3));
+  const m = new THREE.PointsMaterial({ size:2.2, color:0xffffff, transparent:true, opacity:0.75, depthWrite:false });
+  const pts = new THREE.Points(g,m);
+  return pts;
+}
+scene.add(makeStars());
+
+function makeNebulaSprite(){
+  // bikin texture nebula dari canvas (biar gak butuh file png)
+  const c = document.createElement("canvas");
+  c.width = 1024; c.height = 1024;
+  const x = c.getContext("2d");
+
+  // background transparent
+  x.clearRect(0,0,c.width,c.height);
+
+  // beberapa radial gradient layer
+  function blob(cx,cy,r, colA, colB){
+    const g = x.createRadialGradient(cx,cy, 10, cx,cy,r);
+    g.addColorStop(0, colA);
+    g.addColorStop(1, colB);
+    x.fillStyle = g;
+    x.beginPath(); x.arc(cx,cy,r,0,Math.PI*2); x.fill();
+  }
+
+  blob(520,520,480, "rgba(170,80,255,0.62)", "rgba(0,0,0,0)");
+  blob(460,540,420, "rgba(80,220,255,0.45)", "rgba(0,0,0,0)");
+  blob(560,470,360, "rgba(255,120,180,0.35)", "rgba(0,0,0,0)");
+  blob(520,520,260, "rgba(255,255,255,0.20)", "rgba(0,0,0,0)");
+
+  // noise halus
+  const img = x.getImageData(0,0,c.width,c.height);
+  for(let i=0;i<img.data.length;i+=4){
+    const n = (Math.random()-0.5)*22;
+    img.data[i+0]=Math.min(255, img.data[i+0] + n);
+    img.data[i+1]=Math.min(255, img.data[i+1] + n);
+    img.data[i+2]=Math.min(255, img.data[i+2] + n);
+  }
+  x.putImageData(img,0,0);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent:true,
+    opacity: 1,
+    depthWrite:false,
+    blending: THREE.AdditiveBlending
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(NEBULA_SIZE, NEBULA_SIZE, 1);
+  spr.position.set(0,0,0);
+  return spr;
+}
+
+const nebula = makeNebulaSprite();
+scene.add(nebula);
+
+/* =========================
+   "METEOR" DATA (3D positions)
+   - banyak data, tapi mesh cuma 20 (pool)
+========================= */
+function randRing3D(){
+  // sebaran 3D "orbital belt" (kayak debris)
+  const t = Math.random();
+  const r = Math.sqrt(t*(R_MAX*R_MAX - R_MIN*R_MIN) + R_MIN*R_MIN);
+
+  // angle orbit
+  const a = Math.random()*Math.PI*2;
+
+  // thickness (biar nyebar atas bawah)
+  const y = (Math.random()*2-1) * 110;
+
+  // sedikit "warp" supaya gak membentuk ring rapi
+  const warp = (Math.random()*2-1) * 35;
+
+  const x = Math.cos(a)*r + warp;
+  const z = Math.sin(a)*r - warp;
+
+  return {x,y,z, r, a};
+}
+
+const meteors = [];
+for(let i=0;i<METEOR_COUNT;i++){
+  const p = randRing3D();
+  meteors.push({
+    // pakai foto 1..TOTAL_PHOTO tapi diulang acak
+    photoId: 1 + (i % TOTAL_PHOTO),
+    x:p.x, y:p.y, z:p.z,
+    r:p.r,
+    ang:p.a,
+    speed: (0.7 + Math.random()*0.9),
+    tilt: (Math.random()*2-1) * 0.6,
+    spin: (Math.random()*2-1) * 0.01
+  });
+}
+
+/* =========================
+   LOAD TEXTURES (fotos/1.jpg..)
+========================= */
+const loader = new THREE.TextureLoader();
+const photoTex = new Array(TOTAL_PHOTO+1);
+let loaded = 0;
+
+for(let i=1;i<=TOTAL_PHOTO;i++){
+  loader.load(`fotos/${i}.jpg`, (t)=>{
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 2;
+    photoTex[i]=t;
+    loaded++;
+  }, undefined, ()=>{
+    // kalau ada yg gagal, biarin null
+  });
+}
+
+/* =========================
+   PHOTO MATERIAL + POOL (20 meshes)
+   - rectangle 9:16 (plane)
+   - ada glow tipis
+========================= */
+function makePhotoMat(tex){
+  return new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent:true,
+    opacity:1.0,
+    side:THREE.DoubleSide,
+    depthWrite:false
+  });
+}
+
+const pool = [];
+const poolGlow = [];
+
+const geom = new THREE.PlaneGeometry(BASE_H*PHOTO_ASPECT, BASE_H, 1, 1);
+
+// glow plane (lebih besar)
+const glowGeom = new THREE.PlaneGeometry(BASE_H*PHOTO_ASPECT*1.18, BASE_H*1.18, 1, 1);
+
+for(let i=0;i<MAX_RENDER;i++){
+  const tex = photoTex[1] || null;
+  const m = new THREE.Mesh(geom, makePhotoMat(tex));
+  m.visible = false;
+  scene.add(m);
+  pool.push(m);
+
+  // glow (additive) biar cinematic
+  const glowMat = new THREE.MeshBasicMaterial({
+    color:0xffffff,
+    transparent:true,
+    opacity:0.16,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  });
+  const g = new THREE.Mesh(glowGeom, glowMat);
+  g.visible = false;
+  scene.add(g);
+  poolGlow.push(g);
+}
+
+/* =========================
+   CAMERA CONTROL (mobile)
+   - drag: orbit rotate
+   - pinch: zoom in/out (camera distance)
+========================= */
+let yaw = 0.6, pitch = 0.18;
+let dist = 620;
+let targetDist = 620;
+
+let dragging = false;
+let lastX=0,lastY=0;
+
+const dom = renderer.domElement;
+
+dom.addEventListener("pointerdown",(e)=>{
+  dragging=true; lastX=e.clientX; lastY=e.clientY;
+});
+
+dom.addEventListener("pointermove",(e)=>{
+  if(!dragging) return;
+  const dx = e.clientX-lastX;
+  const dy = e.clientY-lastY;
+  yaw   -= dx*0.0042;
+  pitch -= dy*0.0036;
+  pitch = Math.max(-0.95, Math.min(0.95, pitch));
+  lastX=e.clientX; lastY=e.clientY;
+  followIndex = -1; // kalau manual, stop follow
+});
+
+dom.addEventListener("pointerup",()=> dragging=false);
+dom.addEventListener("pointercancel",()=> dragging=false);
+
+// pinch zoom
+let lastPinch = null;
+dom.addEventListener("touchmove",(e)=>{
+  if(e.touches.length!==2) return;
+  e.preventDefault();
+  const dx = e.touches[0].clientX - e.touches[1].clientX;
+  const dy = e.touches[0].clientY - e.touches[1].clientY;
+  const d = Math.hypot(dx,dy);
+  if(lastPinch){
+    const ratio = d/lastPinch;
+    targetDist = THREE.MathUtils.clamp(targetDist/ratio, 220, 1400);
+  }
+  lastPinch = d;
+},{passive:false});
+dom.addEventListener("touchend",()=> lastPinch=null);
+
+// wheel zoom desktop
+dom.addEventListener("wheel",(e)=>{
+  e.preventDefault();
+  targetDist = THREE.MathUtils.clamp(targetDist + e.deltaY*0.35, 220, 1400);
+},{passive:false});
+
+/* =========================
+   RAYCAST CLICK -> FOLLOW
+========================= */
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+let followIndex = -1;
+
+function onTapPick(clientX, clientY){
+  const rect = dom.getBoundingClientRect();
+  mouse.x = ((clientX - rect.left)/rect.width)*2 - 1;
+  mouse.y = -(((clientY - rect.top)/rect.height)*2 - 1);
+
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(pool, true);
+  if(hits.length){
+    const hit = hits[0].object;
+    const idx = pool.indexOf(hit);
+    if(idx >= 0 && pool[idx].userData && pool[idx].userData.dataIndex >= 0){
+      followIndex = pool[idx].userData.dataIndex;
+      autoTour = false;
+      btnAuto.textContent = "🧭 Auto Tour: OFF";
+      // zoom sedikit in
+      targetDist = Math.max(260, targetDist*0.86);
+      return;
+    }
+  }
+  // tap kosong: lepas follow
+  followIndex = -1;
+}
+
+let tapStart = null;
+dom.addEventListener("pointerdown",(e)=>{
+  tapStart = {x:e.clientX,y:e.clientY,t:performance.now()};
+});
+dom.addEventListener("pointerup",(e)=>{
+  if(!tapStart) return;
+  const moved = Math.hypot(e.clientX-tapStart.x, e.clientY-tapStart.y);
+  const dt = performance.now()-tapStart.t;
+  if(moved < 10 && dt < 350){
+    onTapPick(e.clientX, e.clientY);
+  }
+  tapStart = null;
+});
+
+/* =========================
+   ROMANTIC TEXT (EDIT)
+========================= */
+const loveLines = new Map([
+  [1, "Aku nggak butuh semesta… aku cuma butuh kamu. 🌌❤️"],
+  [2, "Kalau kamu capek, sini—aku peluk dari jauh. 🤍"],
+  [3, "Di antara jutaan bintang, kamu paling terang buat aku. ✨"],
+  [7, "Aku sayang kamu… lebih dari kata-kata bisa jelasin. 😚"],
+  [13,"Kamu rumah paling tenang yang pernah aku temuin. 🏡"],
+]);
+
+/* =========================
+   SHUFFLE
+========================= */
+document.getElementById("btnShuffle").onclick = ()=>{
+  for(const m of meteors){
+    const p = randRing3D();
+    m.x=p.x; m.y=p.y; m.z=p.z; m.r=p.r; m.ang=p.a;
+  }
+  followIndex = -1;
+};
+
+/* =========================
+   LOOP
+========================= */
+const clock = new THREE.Clock();
+
+function updateCamera(){
+  // smooth dist
+  dist = THREE.MathUtils.lerp(dist, targetDist, 0.10);
+
+  // follow: kamera mendekat ke foto target (petualangan)
+  if(followIndex >= 0){
+    const m = meteors[followIndex];
+    // arahkan yaw/pitch ke objek (biar kamera "ngikutin")
+    const to = new THREE.Vector3(m.x, m.y, m.z);
+    const dir = to.clone().normalize();
+    const tyaw = Math.atan2(dir.x, dir.z);
+    const tpitch = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+
+    yaw = THREE.MathUtils.lerp(yaw, tyaw, 0.05);
+    pitch = THREE.MathUtils.lerp(pitch, tpitch, 0.05);
+    targetDist = THREE.MathUtils.lerp(targetDist, 260, 0.02); // “masuk” ke foto
+  }
+
+  // auto tour: keliling
+  if(autoTour){
+    const t = clock.elapsedTime;
+    yaw += 0.0011;
+    pitch = THREE.MathUtils.lerp(pitch, Math.sin(t*0.35)*0.18, 0.02);
+    targetDist = THREE.MathUtils.lerp(targetDist, 520 + Math.sin(t*0.5)*40, 0.02);
+  }
+
+  const cx = 0, cy = 0, cz = 0;
+  const px = cx + Math.sin(yaw) * Math.cos(pitch) * dist;
+  const py = cy + Math.sin(pitch) * dist;
+  const pz = cz + Math.cos(yaw) * Math.cos(pitch) * dist;
+
+  camera.position.set(px, py, pz);
+  camera.lookAt(cx, cy, cz);
+}
+
+function updateMeteors(dt){
+  for(const m of meteors){
+    m.ang += ORBIT_SPEED * m.speed * (dt*60);
+    const rr = m.r + Math.sin(m.ang*3.0 + m.tilt)*12; // variasi
+    m.x = Math.cos(m.ang)*rr;
+    m.z = Math.sin(m.ang)*rr;
+    // y tetap + sedikit wobble
+    m.y = m.y*0.999 + Math.sin(m.ang*2.2 + m.tilt)*0.15;
+  }
+}
+
+function pickNearestAndRender(){
+  // cari meteor terdekat dari kamera (distance)
+  // tapi yang dirender adalah yang dekat dengan "target look" (biar serasa petualangan)
+  const camPos = camera.position;
+
+  // compute array of distances (ambil 20 terdekat)
+  // kita pakai partial selection simple (sorting) karena METEOR_COUNT 1500 masih aman
+  const arr = [];
+  for(let i=0;i<meteors.length;i++){
+    const m = meteors[i];
+    const dx = m.x - camPos.x;
+    const dy = m.y - camPos.y;
+    const dz = m.z - camPos.z;
+    const d2 = dx*dx + dy*dy + dz*dz;
+    arr.push([d2, i]);
+  }
+  arr.sort((a,b)=>a[0]-b[0]);
+  const nearest = arr.slice(0, MAX_RENDER);
+
+  // tampilkan pool sesuai nearest
+  for(let p=0;p<MAX_RENDER;p++){
+    const mesh = pool[p];
+    const glow = poolGlow[p];
+
+    const dataIndex = nearest[p]?.[1];
+    if(dataIndex == null){
+      mesh.visible = false;
+      glow.visible = false;
+      continue;
+    }
+
+    const m = meteors[dataIndex];
+    mesh.userData.dataIndex = dataIndex;
+
+    // set texture sesuai photoId
+    const tex = photoTex[m.photoId];
+    if(tex && mesh.material.map !== tex){
+      mesh.material.map = tex;
+      mesh.material.needsUpdate = true;
+    }
+
+    // position + rotation (selalu menghadap kamera = billboard)
+    mesh.position.set(m.x, m.y, m.z);
+    mesh.quaternion.copy(camera.quaternion);
+
+    // ukuran dinamis: dekat gede, jauh kecil
+    const distToCam = Math.sqrt(nearest[p][0]);
+    const scale = THREE.MathUtils.clamp(1.25 - (distToCam/900), 0.32, 1.15);
+    mesh.scale.setScalar(scale);
+
+    // alpha halus (biar tidak “hilang” saat zoom)
+    const alpha = THREE.MathUtils.clamp(1.0 - (distToCam/1100), 0.12, 1.0);
+    mesh.material.opacity = alpha;
+
+    mesh.visible = true;
+
+    // glow
+    glow.position.copy(mesh.position);
+    glow.quaternion.copy(mesh.quaternion);
+    glow.scale.setScalar(scale);
+    glow.material.opacity = 0.22 * alpha;
+    glow.visible = true;
+  }
+
+  // romantic text: kalau kamera dekat meteor tertentu
+  const closestData = meteors[nearest[0]?.[1] ?? 0];
+  if(closestData){
+    const line = loveLines.get(closestData.photoId);
+    const camDist = Math.sqrt(nearest[0]?.[0] ?? 999999);
+    const closeEnough = camDist < 320; // threshold
+    if(line && closeEnough){
+      loveBox.innerHTML = `${line}<small>(${closestData.photoId}.jpg)</small>`;
+      loveBox.style.opacity = 1;
+    }else{
+      loveBox.style.opacity = 0;
+    }
+  }else{
+    loveBox.style.opacity = 0;
+  }
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+
+  const dt = clock.getDelta();
+
+  updateCamera();
+  updateMeteors(dt);
+
+  // nebula selalu menghadap kamera
+  nebula.quaternion.copy(camera.quaternion);
+
+  pickNearestAndRender();
+
+  hud.textContent = `Loaded: ${loaded}/${TOTAL_PHOTO} • Render: ${MAX_RENDER}/${METEOR_COUNT} • Dist: ${dist.toFixed(0)} • Follow: ${followIndex>=0 ? meteors[followIndex].photoId+".jpg" : "-"}`;
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
